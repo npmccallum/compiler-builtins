@@ -18,7 +18,7 @@ mod i_to_f {
                 #[test]
                 fn $fn() {
                     use compiler_builtins::float::conv::$fn;
-                    use compiler_builtins::support::Int;
+                    use compiler_builtins::support::MinInt;
 
                     fuzz(N, |x: $i_ty| {
                         let f0 = apfloat_fallback!(
@@ -41,36 +41,31 @@ mod i_to_f {
                         );
                         let f1: $f_ty = $fn(x);
 
+                        // Check rounding against `rustc_apfloat`, a correctly-rounded oracle, by
+                        // comparing bits directly. The previous heuristic instead cast the float
+                        // result back to an integer, which saturates `inf` to `iN::MAX` and so
+                        // misfires for `f16`: an overflowing conversion correctly yields `inf`
+                        // (e.g. `2147483648 as f16`), but the round-trip flagged it as mis-rounded.
+                        //
+                        // Gated on the system routine being available; otherwise `f0` is already
+                        // the apfloat result and the native comparison below covers it.
                         #[cfg($sys_available)] {
-                            // This makes sure that the conversion produced the best rounding possible, and does
-                            // this independent of `x as $into` rounding correctly.
-                            // This assumes that float to integer conversion is correct.
-                            let y_minus_ulp = <$f_ty>::from_bits(f1.to_bits().wrapping_sub(1)) as $i_ty;
-                            let y = f1 as $i_ty;
-                            let y_plus_ulp = <$f_ty>::from_bits(f1.to_bits().wrapping_add(1)) as $i_ty;
-                            let error_minus = <$i_ty as Int>::abs_diff(y_minus_ulp, x);
-                            let error = <$i_ty as Int>::abs_diff(y, x);
-                            let error_plus = <$i_ty as Int>::abs_diff(y_plus_ulp, x);
+                            type ApFloat = rustc_apfloat::ieee::$apfloat_ty;
 
-                            // The first two conditions check that none of the two closest float values are
-                            // strictly closer in representation to `x`. The second makes sure that rounding is
-                            // towards even significand if two float values are equally close to the integer.
-                            if error_minus < error
-                                || error_plus < error
-                                || ((error_minus == error || error_plus == error)
-                                    && ((f0.to_bits() & 1) != 0))
-                            {
+                            let expected = if <$i_ty>::SIGNED {
+                                ApFloat::from_i128(x.try_into().unwrap()).value
+                            } else {
+                                ApFloat::from_u128(x.try_into().unwrap()).value
+                            }
+                            .to_bits();
+
+                            if u128::from(f1.to_bits()) != expected {
                                 panic!(
-                                    "incorrect rounding by {}({}): {}, ({}, {}, {}), errors ({}, {}, {})",
+                                    "incorrect conversion by {}({}): apfloat {:#x}, builtins {:#x}",
                                     stringify!($fn),
                                     x,
+                                    expected,
                                     f1.to_bits(),
-                                    y_minus_ulp,
-                                    y,
-                                    y_plus_ulp,
-                                    error_minus,
-                                    error,
-                                    error_plus,
                                 );
                             }
                         }
